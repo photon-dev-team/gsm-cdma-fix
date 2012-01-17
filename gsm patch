@@ -1,0 +1,301 @@
+project frameworks/base/
+diff --git a/core/java/android/os/Looper.java b/core/java/android/os/Looper.java
+index 5607f7f..fe74af8 100644
+--- a/core/java/android/os/Looper.java
++++ b/core/java/android/os/Looper.java
+@@ -134,7 +134,11 @@ public class Looper {
+                     threadStart = SystemClock.currentThreadTimeMicro();
+                 }
+ 
+-                msg.target.dispatchMessage(msg);
++                try {
++                       msg.target.dispatchMessage(msg);
++                }catch(Exception ex) {
++                       Log.e(TAG, "LP mark error occured while dispatchMessage 
++                }
+ 
+                 if (logging != null) {
+                     long wallTime = SystemClock.currentTimeMicro() - wallStart;
+diff --git a/libs/ui/Android.mk b/libs/ui/Android.mk
+index 25f68f3..b15484a 100644
+--- a/libs/ui/Android.mk
++++ b/libs/ui/Android.mk
+@@ -45,6 +45,7 @@ LOCAL_SRC_FILES:= \
+        EGLUtils.cpp \
+        FramebufferNativeWindow.cpp \
+        GraphicBuffer.cpp \
++       Overlay.cpp \
+        GraphicBufferAllocator.cpp \
+        GraphicBufferMapper.cpp \
+        GraphicLog.cpp \
+diff --git a/telephony/java/android/telephony/ServiceState.java b/telephony/java
+index 2f010e5..71f1b43 100644
+--- a/telephony/java/android/telephony/ServiceState.java
++++ b/telephony/java/android/telephony/ServiceState.java
+@@ -19,8 +19,9 @@ package android.telephony;
+ import android.os.Bundle;
+ import android.os.Parcel;
+ import android.os.Parcelable;
++import android.os.SystemProperties;
+ import android.util.Log;
+-
++import com.android.internal.telephony.CustomSpnReader;
+ /**
+  * Contains phone state and service related information.
+  *
+@@ -114,6 +115,8 @@ public class ServiceState implements Parcelable {
+     /** @hide */
+     public static final int REGISTRATION_STATE_ROAMING = 5;
+ 
++    private static String PROPERTY_CDMA_HOME_OPERATOR_NUMERIC = "ro.cdma.home.o
++
+     private int mState = STATE_OUT_OF_SERVICE;
+     private boolean mRoaming;
+     private String mOperatorAlphaLong;
+@@ -544,9 +547,11 @@ public class ServiceState implements Parcelable {
+     }
+ 
+     public void setOperatorName(String longName, String shortName, String numer
+-        mOperatorAlphaLong = longName;
++        //mOperatorAlphaLong = longName;
+         mOperatorAlphaShort = shortName;
+         mOperatorNumeric = numeric;
++        
++        mOperatorAlphaLong = CustomSpnReader.GetCustomName(numeric,longName);
+     }
+ 
+     /**
+@@ -556,7 +561,14 @@ public class ServiceState implements Parcelable {
+      * @hide
+      */
+     public void setOperatorAlphaLong(String longName) {
+-        mOperatorAlphaLong = longName;
++        //mOperatorAlphaLong = longName;
++       //CDMA:numeric got from build.prop,lanpeng add
++       String operatorNumberic = SystemProperties.get(PROPERTY_CDMA_HOME_OPERAT
++       if(operatorNumberic == null || operatorNumberic.isEmpty()) {
++               mOperatorAlphaLong = CustomSpnReader.GetCustomName(mOperatorNume
++       }else {
++               mOperatorAlphaLong = CustomSpnReader.GetCustomName(operatorNumbe
++       }
+     }
+ 
+     public void setIsManualSelection(boolean isManual) {
+diff --git a/telephony/java/com/android/internal/telephony/CallManager.java b/te
+index 3dd57ee..bffdc72 100644
+--- a/telephony/java/com/android/internal/telephony/CallManager.java
++++ b/telephony/java/com/android/internal/telephony/CallManager.java
+@@ -310,6 +310,34 @@ public final class CallManager {
+         return false;
+     }
+ 
++    public boolean registerPhone(Phone phone, boolean flag)
++    {
++        Phone basePhone = getPhoneBase(phone);
++        boolean bResult = true;
++        if(basePhone != null && !mPhones.contains(bResult))
++        {
++               Log.d(LOG_TAG, "registerPhone(" +
++                    phone.getPhoneName() + " " + phone + ")");
++            if(mPhones.isEmpty() || flag)
++                mDefaultPhone = basePhone;
++            mPhones.add(basePhone);
++            mRingingCalls.add(basePhone.getRingingCall());
++            mBackgroundCalls.add(basePhone.getBackgroundCall());
++            mForegroundCalls.add(basePhone.getForegroundCall());
++            registerForPhoneStates(basePhone);
++            bResult = true;
++        } else
++        {
++               bResult = false;
++        }
++        return bResult;
++    }
++    
++    public boolean registerPhoneAsDefault(Phone phone)
++    {
++        return registerPhone(phone, true);
++    }
++
+     /**
+      * unregister phone from CallManager
+      * @param phone to be unregistered
+diff --git a/telephony/java/com/android/internal/telephony/PhoneFactory.java b/t
+index fa563a6..a8bb7de 100644
+--- a/telephony/java/com/android/internal/telephony/PhoneFactory.java
++++ b/telephony/java/com/android/internal/telephony/PhoneFactory.java
+@@ -29,8 +29,6 @@ import com.android.internal.telephony.gsm.GSMPhone;
+ import com.android.internal.telephony.sip.SipPhone;
+ import com.android.internal.telephony.sip.SipPhoneFactory;
+ 
+-import java.lang.reflect.Constructor;
+-
+ /**
+  * {@hide}
+  */
+@@ -135,19 +133,17 @@ public class PhoneFactory {
+                 Log.i(LOG_TAG, "Cdma Subscription set to " + cdmaSubscription);
+ 
+                 //reads the system properties and makes commandsinterface
+-                String sRILClassname = SystemProperties.get("ro.telephony.ril_c
++               String sRILClassname = SystemProperties.get("ro.telephony.ril_cl
+                 Log.i(LOG_TAG, "RILClassname is " + sRILClassname);
+-
+-                // Use reflection to construct the RIL class (defaults to RIL)
+-                try {
+-                    Class<?> classDefinition = Class.forName("com.android.inter
+-                    Constructor<?> constructor = classDefinition.getConstructor
+-                    sCommandsInterface = (RIL) constructor.newInstance(new Obje
+-                } catch (Exception e) {
+-                    // 6 different types of exceptions are thrown here that it'
+-                    // easier to just catch Exception as our "error handling" i
+-                    Log.wtf(LOG_TAG, "Unable to construct command interface", e
+-                    throw new RuntimeException(e);
++  
++                if ("mototegra".equals(sRILClassname)) {
++                    Log.i(LOG_TAG, "Using Motorola Tegra2 RIL");
++                    sCommandsInterface = new MotoTegraRIL(context, networkMode,
++                } else if ("mototegraglobal".equals(sRILClassname)) {
++                    Log.i(LOG_TAG, "Using Motorola Tegra2 global edition RIL");
++                    sCommandsInterface = new MotoTegraGlobalRIL(context, networ
++                }else {
++                       sCommandsInterface = new RIL(context, networkMode, cdmaS
+                 }
+ 
+                 int phoneType = getPhoneType(networkMode);
+diff --git a/telephony/java/com/android/internal/telephony/PhoneProxy.java b/tel
+index 60f364e..13ac856 100644
+--- a/telephony/java/com/android/internal/telephony/PhoneProxy.java
++++ b/telephony/java/com/android/internal/telephony/PhoneProxy.java
+@@ -88,6 +88,7 @@ public class PhoneProxy extends Handler implements Phone {
+             if(mOutgoingPhone.equals("GSM")) {
+                 logd("Make a new CDMAPhone and destroy the old GSMPhone.");
+ 
++                CallManager.getInstance().unregisterPhone(mActivePhone);
+                 ((GSMPhone)mActivePhone).dispose();
+                 Phone oldPhone = mActivePhone;
+ 
+@@ -99,12 +100,13 @@ public class PhoneProxy extends Handler implements Phone {
+ 
+                 mActivePhone = PhoneFactory.getCdmaPhone();
+                 ((GSMPhone)oldPhone).removeReferences();
+-                oldPhone = null;
++                //oldPhone = null;
++                CallManager.getInstance().registerPhoneAsDefault(mActivePhone);
+             } else {
+                 logd("Make a new GSMPhone and destroy the old CDMAPhone.");
+ 
++                CallManager.getInstance().unregisterPhone(mActivePhone);
+                 ((CDMAPhone)mActivePhone).dispose();
+-                //mActivePhone = null;
+                 Phone oldPhone = mActivePhone;
+ 
+                 // Give the GC a hint to start the garbage collection asap
+@@ -115,7 +117,8 @@ public class PhoneProxy extends Handler implements Phone {
+ 
+                 mActivePhone = PhoneFactory.getGsmPhone();
+                 ((CDMAPhone)oldPhone).removeReferences();
+-                oldPhone = null;
++                //oldPhone = null;
++                CallManager.getInstance().registerPhoneAsDefault(mActivePhone);
+             }
+ 
+             if (mResetModemOnRadioTechnologyChange) {
+diff --git a/telephony/java/com/android/internal/telephony/RIL.java b/telephony/
+index 529724b..e9fe6dd 100644
+--- a/telephony/java/com/android/internal/telephony/RIL.java
++++ b/telephony/java/com/android/internal/telephony/RIL.java
+@@ -2966,7 +2966,7 @@ public class RIL extends BaseCommands implements CommandsI
+         return new IccIoResult(sw1, sw2, s);
+     }
+ 
+-    private boolean needsOldRilFeature(String feature) {
++    protected boolean needsOldRilFeature(String feature) {
+         String[] features = SystemProperties.get("ro.telephony.ril.v3", "").spl
+         for (String found: features) {
+             if (found.equals(feature))
+diff --git a/telephony/java/com/android/internal/telephony/cdma/CdmaServiceState
+index d939e98..112767a 100755
+--- a/telephony/java/com/android/internal/telephony/cdma/CdmaServiceStateTracker
++++ b/telephony/java/com/android/internal/telephony/cdma/CdmaServiceStateTracker
+@@ -144,6 +144,8 @@ public class CdmaServiceStateTracker extends ServiceStateTra
+ 
+     private ContentResolver cr;
+     private String currentCarrier = null;
++    //lanpeng add 
++    private String mRILClassname = SystemProperties.get("ro.telephony.ril_class
+ 
+     private ContentObserver mAutoTimeObserver = new ContentObserver(new Handler
+         @Override
+@@ -594,6 +596,11 @@ public class CdmaServiceStateTracker extends ServiceStateTr
+                     if (states[13] != null) {
+                         reasonForDenial = Integer.parseInt(states[13]);
+                     }
++                   boolean isMotoTegraGlobal = "mototegraglobal".equals(mRILCla
++                    if(isMotoTegraGlobal) {
++                       Log.i(LOG_TAG,"LP marked mototegraglobal detected ,Globa
++                       Log.i(LOG_TAG,"It has an extra value : " + states[14]);
++                    }
+                 } catch (NumberFormatException ex) {
+                     loge("EVENT_POLL_STATE_REGISTRATION_CDMA: error parsing: " 
+                 }
+
+project packages/apps/Phone/
+diff --git a/src/com/android/phone/CallNotifier.java b/src/com/android/phone/Cal
+index 2e82543..38d7d5b 100755
+--- a/src/com/android/phone/CallNotifier.java
++++ b/src/com/android/phone/CallNotifier.java
+@@ -906,6 +906,7 @@ public class CallNotifier extends Handler
+         // Release the ToneGenerator used for playing SignalInfo and CallWaitin
+         if (mSignalInfoToneGenerator != null) {
+             mSignalInfoToneGenerator.release();
++            mSignalInfoToneGenerator = null;
+         }
+ 
+         // Clear ringback tone player
+@@ -1698,6 +1699,23 @@ public class CallNotifier extends Handler
+ 
+                 //Start playing the new tone if its a valid tone
+                 mSignalInfoToneGenerator.startTone(mToneId);
++            }else {
++               log("LP mark to make an new Instanse of mSignalInfoToneGenerator
++               try {
++                    mSignalInfoToneGenerator = new ToneGenerator(AudioManager.S
++                            TONE_RELATIVE_VOLUME_SIGNALINFO);
++                    
++                  //First stop any ongoing SignalInfo tone
++                    mSignalInfoToneGenerator.stopTone();
++
++                    //Start playing the new tone if its a valid tone
++                    mSignalInfoToneGenerator.startTone(mToneId);
++                    
++                } catch (RuntimeException e) {
++                    Log.w(LOG_TAG, "CallNotifier: Exception caught while creati
++                            "mSignalInfoToneGenerator: " + e);
++                    mSignalInfoToneGenerator = null;
++                }
+             }
+         }
+     }
+
+project vendor/cm/
+diff --git a/vendorsetup.sh b/vendorsetup.sh
+index 90d03c1..5a56425 100644
+--- a/vendorsetup.sh
++++ b/vendorsetup.sh
+@@ -4,12 +4,14 @@ add_lunch_combo cm_p4tmo-userdebug
+ add_lunch_combo cm_p4vzw-userdebug
+ add_lunch_combo cm_p4wifi-userdebug
+ add_lunch_combo cm_maguro-userdebug
++add_lunch_combo cm_olympus-userdebug
+ add_lunch_combo cm_p920-userdebug
+ add_lunch_combo cm_p970-userdebug
+ add_lunch_combo cm_p990-userdebug
+ add_lunch_combo cm_p999-userdebug
+ add_lunch_combo cm_pyramid-userdebug
+ add_lunch_combo cm_shooter-userdebug
++add_lunch_combo cm_sunfire-userdebug
+ add_lunch_combo cm_smb_a1011-userdebug
+ add_lunch_combo cm_toro-userdebug
+ add_lunch_combo cm_wingray-userdebug
+
